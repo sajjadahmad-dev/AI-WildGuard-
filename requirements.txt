@@ -1,18 +1,11 @@
-matplotlib
-numpy
-opencv-python-headless
-pandas
-Pillow
-plotly
-PyYAML
-requests
-streamlit
-tensorflow
-tensorflow-intel
-torch
-torchvision
+streamlit 
+torch 
+torchvision 
 transformers
+opencv-python
+pillow 
+numpy
+pandas 
+matplotlib
 ultralytics
-huggingface-hub
-datetime
 
