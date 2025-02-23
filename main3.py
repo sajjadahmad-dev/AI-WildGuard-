@@ -6,27 +6,21 @@ import tensorflow as tf
 import cv2
 import tempfile
 from PIL import Image
+from ultralytics import YOLO
 from transformers import AutoImageProcessor, AutoModelForImageClassification, pipeline
 import matplotlib.pyplot as plt
 import time
 from datetime import datetime
 import os
-from land_change import *
-from threat import *
-from species_mont import *
+import requests
+from torchvision import transforms
+from torchvision.models import mobilenet_v3_large, MobileNet_V3_Large_Weights
+import torch.nn.functional as F
 
 # Load Models
-#st.sidebar.info("Loading AI models... Please wait.")
 species_processor = AutoImageProcessor.from_pretrained("microsoft/resnet-50")
 species_model = AutoModelForImageClassification.from_pretrained("microsoft/resnet-50").eval()
-
-# Load YOLOv8 from Hugging Face
-from transformers import YolosForObjectDetection, YolosImageProcessor
-
-# Initialize YOLOv8 model and processor
-yolo_processor = YolosImageProcessor.from_pretrained("hustvl/yolos-tiny")
-yolo_model = YolosForObjectDetection.from_pretrained("hustvl/yolos-tiny").eval()
-
+yolo_model = YOLO("yolov8x.pt")
 threat_model = pipeline("image-classification", model="nateraw/vit-base-beans")
 
 # Habitat Analysis Model
@@ -41,89 +35,105 @@ class HabitatAnalyzer:
     def detect_land_changes(self, image1, image2):
         return cv2.absdiff(image1, image2)
 
-class SpeciesMonitor:
-    def detect_species(self, image):
-        inputs = species_processor(image, return_tensors="pt")
-        with torch.no_grad():
-            outputs = species_model(**inputs)
-            probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
+class SpeciesMonitoringSystem:
+    def __init__(self):
+        self.detection_model = mobilenet_v3_large(weights=MobileNet_V3_Large_Weights.DEFAULT)
+        self.detection_model.eval()
         
-        top_preds = torch.topk(probs, 5)
+        self.species_classes = [
+            'deer', 'elk', 'moose', 'bear', 'wolf', 'mountain lion', 'bobcat', 
+            'lynx', 'bighorn sheep', 'bison', 'wild boar', 'caribou', 'antelope',
+            'coyote', 'jaguar', 'leopard', 'tiger', 'lion', 'gorilla', 'chimpanzee',
+            'fox', 'raccoon', 'beaver', 'badger', 'otter', 'wolverine', 'porcupine',
+            'skunk', 'opossum', 'armadillo', 'wild cat', 'jackal', 'hyena',
+            'marten', 'fisher', 'weasel', 'mink', 'coati', 'monkey', 'lemur',
+            'rabbit', 'squirrel', 'chipmunk', 'rat', 'mouse', 'vole', 'mole',
+            'shrew', 'bat', 'hedgehog', 'gopher', 'prairie dog', 'muskrat',
+            'hamster', 'guinea pig', 'ferret', 'chinchilla', 'dormouse',
+            'eagle', 'hawk', 'falcon', 'owl', 'vulture', 'condor', 'crow', 'raven',
+            'woodpecker', 'duck', 'goose', 'swan', 'heron', 'crane', 'stork',
+            'pelican', 'flamingo', 'penguin', 'ostrich', 'emu', 'kiwi', 'peacock',
+            'pheasant', 'quail', 'grouse', 'turkey', 'cardinal', 'bluejay',
+            'sparrow', 'finch', 'warbler', 'thrush', 'swallow', 'hummingbird',
+            'snake', 'lizard', 'turtle', 'tortoise', 'alligator', 'crocodile',
+            'iguana', 'gecko', 'monitor lizard', 'chameleon', 'python', 'cobra',
+            'viper', 'rattlesnake', 'boa', 'anaconda', 'skink', 'bearded dragon',
+            'frog', 'toad', 'salamander', 'newt', 'axolotl', 'caecilian',
+            'tree frog', 'bullfrog', 'fire salamander', 'spotted salamander',
+            'salmon', 'trout', 'bass', 'pike', 'catfish', 'carp', 'perch',
+            'tuna', 'swordfish', 'marlin', 'shark', 'ray', 'eel', 'sturgeon',
+            'barracuda', 'grouper', 'snapper', 'cod', 'halibut', 'flounder',
+            'whale', 'dolphin', 'porpoise', 'seal', 'sea lion', 'walrus',
+            'orca', 'narwhal', 'beluga', 'manatee', 'dugong', 'sea otter',
+            'butterfly', 'moth', 'beetle', 'ant', 'bee', 'wasp', 'spider',
+            'scorpion', 'centipede', 'millipede', 'crab', 'lobster', 'shrimp',
+            'octopus', 'squid', 'jellyfish', 'starfish', 'sea urchin', 'coral',
+            'snail', 'slug', 'earthworm', 'leech'
+        ]
+        
+        self.transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                               std=[0.229, 0.224, 0.225])
+        ])
+
+    def detect_species(self, image):
+        img_tensor = self.transform(image).unsqueeze(0)
+        
+        with torch.no_grad():
+            outputs = self.detection_model(img_tensor)
+            probabilities = F.softmax(outputs, dim=1)
+            
+        top_prob, top_class = torch.topk(probabilities, 3)
         results = []
-        for score, idx in zip(top_preds.values[0], top_preds.indices[0]):
-            results.append({
-                'species': species_model.config.id2label[idx.item()],
-                'confidence': score.item() * 100
-            })
+        
+        for i in range(3):
+            species = self.species_classes[top_class[0][i] % len(self.species_classes)]
+            confidence = top_prob[0][i].item() * 100
+            results.append((species, confidence))
+            
         return results
 
     def count_population(self, image):
-        # Convert PIL Image to numpy array
-        img_array = np.array(image)
+        gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        _, thresh = cv2.threshold(blur, 127, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Preprocess image for YOLOv8
-        inputs = yolo_processor(images=img_array, return_tensors="pt")
+        img_with_contours = np.array(image).copy()
+        cv2.drawContours(img_with_contours, contours, -1, (0, 255, 0), 2)
         
-        # Perform inference
-        with torch.no_grad():
-            outputs = yolo_model(**inputs)
-        
-        # Process outputs (example: draw bounding boxes)
-        logits = outputs.logits
-        bboxes = outputs.pred_boxes
-        scores = torch.nn.functional.softmax(logits, dim=-1)
-        
-        # Draw bounding boxes
-        annotated_img = img_array.copy()
-        for box in bboxes[0]:
-            x1, y1, x2, y2 = map(int, box)
-            cv2.rectangle(annotated_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        
-        # Calculate density
-        total_pixels = img_array.shape[0] * img_array.shape[1]
-        count = len(bboxes[0])
-        density = count / total_pixels if total_pixels > 0 else 0
-        
-        return {
-            'count': count,
-            'density': density,
-            'marked_image': annotated_img
-        }
+        return len(contours), Image.fromarray(img_with_contours)
 
     def assess_health(self, image):
-        # Simplified health assessment based on visual features
         img_array = np.array(image)
+        avg_color = np.mean(img_array, axis=(0, 1))
+        texture_measure = np.std(img_array)
+        color_variation = np.std(avg_color)
         
-        # Convert to HSV for better color analysis
-        hsv = cv2.cvtColor(img_array, cv2.COLOR_RGB2HSV)
+        color_score = np.mean(avg_color) / 255 * 100
+        texture_score = min(100, texture_measure / 2)
+        variation_score = min(100, color_variation * 2)
         
-        # Calculate basic health indicators
-        brightness = np.mean(hsv[:,:,2])
-        saturation = np.mean(hsv[:,:,1])
-        color_variance = np.std(hsv[:,:,0])
+        health_score = (color_score * 0.4 + texture_score * 0.3 + variation_score * 0.3)
         
-        # Normalize scores to 0-100 range
-        health_score = min(100, (brightness * 0.4 + saturation * 0.3 + color_variance * 0.3) * 100 / 255)
-        
-        # Determine status based on score
-        if health_score >= 80:
+        if health_score > 80:
             status = "Excellent"
-        elif health_score >= 60:
+        elif health_score > 60:
             status = "Good"
-        elif health_score >= 40:
+        elif health_score > 40:
             status = "Fair"
         else:
             status = "Poor"
-        
-        return {
-            'status': status,
-            'score': health_score,
-            'indicators': {
-                'brightness': brightness,
-                'saturation': saturation,
-                'color_variance': color_variance
-            }
+            
+        indicators = {
+            "Color Vibrancy": color_score,
+            "Texture Complexity": texture_score,
+            "Pattern Variation": variation_score
         }
+            
+        return status, health_score, indicators
 
 def detect_threat(image, labels):
     results = threat_model(image)
@@ -132,46 +142,62 @@ def detect_threat(image, labels):
             return f"{result['label']} Detected with confidence {result['score']:.2f}"
     return "No Threat Detected"
 
+def detect_land_changes(image1_path, image2_path):
+    image1 = Image.open(image1_path)
+    image2 = Image.open(image2_path)
+    
+    image_array1 = np.array(image1)
+    image_array2 = np.array(image2)
+    
+    if image_array1.shape != image_array2.shape:
+        return "Error: Images must be the same size."
+    
+    changes = cv2.absdiff(image_array1, image_array2)
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.image(image1, caption="Image 1")
+    with col2:
+        st.image(image2, caption="Image 2")
+    with col3:
+        st.image(changes, caption="Changes Detected")
+    
+    change_percent = np.sum(changes > 50) / changes.size * 100
+    st.write(f"Changed Area: {change_percent:.2f}%")
+    
+    return changes
+
 def main():
     habitat_analyzer = HabitatAnalyzer()
     
-    # Sidebar Navigation
     st.sidebar.title("Navigation")
     option = st.sidebar.radio("Select an Analysis Type:",
-                             ["Species Monitoring", "land Change Detection", "Animal Monitoring", "Threat Detection"])
+                             ["Species Monitoring", "Land Change Detection", "Animal Monitoring", "Threat Detection"])
 
     if option == "Species Monitoring":
         st.title("Species Identification")
         monitoring_system = SpeciesMonitoringSystem()
     
-    # File uploader
         uploaded_file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
         
         if uploaded_file is not None:
-            # Display original image
             image = Image.open(uploaded_file)
             st.image(image, caption="Uploaded Image", use_column_width=True)
             
-            # Add a progress bar
             progress_bar = st.progress(0)
             
             with st.spinner("Analyzing image..."):
-                # Create three columns for results
                 col1, col2, col3 = st.columns(3)
                 
-                # Species Detection
                 progress_bar.progress(30)
                 species_results = monitoring_system.detect_species(image)
                 
-                # Population Count
                 progress_bar.progress(60)
                 count, marked_image = monitoring_system.count_population(image)
                 
-                # Health Assessment
                 progress_bar.progress(90)
                 health_status, health_score, health_indicators = monitoring_system.assess_health(image)
                 
-                # Display results in columns
                 with col1:
                     st.subheader("🔍 Species Detection")
                     for species, confidence in species_results:
@@ -189,26 +215,21 @@ def main():
                     st.write(f"**Status:** {health_status}")
                     st.write(f"**Overall Score:** {health_score:.1f}/100")
                     
-                    # Display health indicators
                     for indicator, value in health_indicators.items():
                         st.write(f"**{indicator}:**")
                         st.progress(value/100)
                         st.caption(f"{value:.1f}%")
             
-            # Complete progress bar
             progress_bar.progress(100)
             
-            # Add analysis details
             st.sidebar.markdown("---")
             st.sidebar.markdown("### Analysis Details")
             st.sidebar.text(f"Analyzed at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
             st.sidebar.text(f"Image size: {image.size}")
             
-            # Add download buttons for results
             st.markdown("---")
             st.subheader("📊 Export Results")
             
-            # Create a summary of results
             summary = f"""Wildlife Monitoring Analysis Report
             Date: {time.strftime('%Y-%m-%d %H:%M:%S')}
 
@@ -230,7 +251,6 @@ def main():
             for indicator, value in health_indicators.items():
                 summary += f"\n{indicator}: {value:.1f}%"
             
-            # Create download button
             st.download_button(
                 label="Download Analysis Report",
                 data=summary,
@@ -238,10 +258,8 @@ def main():
                 mime="text/plain"
             )
 
-    elif option == "land Change Detection":
+    elif option == "Land Change Detection":
         st.title("🌍 Land Change Detection")
-        #st.write("Upload two images to detect changes over time.")
-
         uploaded_file2 = st.file_uploader("Upload first image", type=['tif', 'png', 'jpg'])
         uploaded_file3 = st.file_uploader("Upload second image", type=['tif', 'png', 'jpg'])
 
@@ -260,21 +278,14 @@ def main():
                 if image is None:
                     st.error("Error loading image. Please upload a valid image file.")
                 else:
-                    # Preprocess image for YOLOv8
-                    inputs = yolo_processor(images=image, return_tensors="pt")
-                    
-                    # Perform inference
-                    with torch.no_grad():
-                        outputs = yolo_model(**inputs)
-                    
-                    # Process outputs (example: draw bounding boxes)
-                    bboxes = outputs.pred_boxes
-                    for box in bboxes[0]:
-                        x1, y1, x2, y2 = map(int, box)
-                        cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    results = yolo_model(image)
+                    for result in results:
+                        for box in result.boxes.xyxy:
+                            x1, y1, x2, y2 = map(int, box[:4])
+                            cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
                             
                     st.image(image, caption="Detected Animals", channels="BGR")
-                    st.write(f"Estimated Count: {len(bboxes[0])}")
+                    st.write(f"Estimated Count: {len(results[0].boxes)}")
             
             elif uploaded_file4.type.startswith("video"):
                 tfile = tempfile.NamedTemporaryFile(delete=False)
@@ -293,19 +304,12 @@ def main():
                             break
                         
                         frame = cv2.resize(frame, (640, 480))
+                        results = yolo_model(frame)
                         
-                        # Preprocess frame for YOLOv8
-                        inputs = yolo_processor(images=frame, return_tensors="pt")
-                        
-                        # Perform inference
-                        with torch.no_grad():
-                            outputs = yolo_model(**inputs)
-                        
-                        # Process outputs (example: draw bounding boxes)
-                        bboxes = outputs.pred_boxes
-                        for box in bboxes[0]:
-                            x1, y1, x2, y2 = map(int, box)
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        for result in results:
+                            for box in result.boxes.xyxy:
+                                x1, y1, x2, y2 = map(int, box[:4])
+                                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                         
                         stframe.image(frame, channels="BGR")
                         time.sleep(0.03)
@@ -331,38 +335,30 @@ def main():
                     st.subheader("🎯 Poaching Activity Detection")
                     
                     with st.spinner("Analyzing image for potential poaching activities..."):
-                        # Preprocess image for YOLOv8
-                        inputs = yolo_processor(images=image, return_tensors="pt")
+                        results = yolo_model(image)
                         
-                        # Perform inference
-                        with torch.no_grad():
-                            outputs = yolo_model(**inputs)
-                        
-                        # Process outputs
-                        bboxes = outputs.pred_boxes
-                        scores = torch.nn.functional.softmax(outputs.logits, dim=-1)
-                        
-                        # Define objects that might indicate poaching
                         poaching_objects = ['person', 'gun', 'knife', 'truck', 'car']
                         detections = {}
                         
-                        # Process YOLO results
-                        for box, score in zip(bboxes[0], scores[0]):
-                            label = yolo_model.config.id2label[torch.argmax(score).item()]
-                            if label in poaching_objects and torch.max(score) > 0.3:  # Confidence threshold
-                                detections[label] = torch.max(score).item()
+                        for result in results:
+                            for box in result.boxes:
+                                cls = int(box.cls[0])
+                                conf = float(box.conf[0])
+                                label = result.names[cls]
+                                
+                                if label in poaching_objects and conf > 0.3:
+                                    detections[label] = conf
                         
-                        # Display results
                         if detections:
                             for obj, conf in detections.items():
                                 st.progress(conf)
                                 st.write(f"{obj.title()}: {conf*100:.1f}% confidence")
                             
-                            # Display annotated image
                             annotated_img = np.array(image)
-                            for box in bboxes[0]:
-                                x1, y1, x2, y2 = map(int, box)
-                                cv2.rectangle(annotated_img, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                            for result in results:
+                                for box in result.boxes:
+                                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                    cv2.rectangle(annotated_img, (x1, y1), (x2, y2), (255, 0, 0), 2)
                             
                             st.image(annotated_img, caption="Detected Objects", use_column_width=True)
                             
@@ -370,7 +366,6 @@ def main():
                                 st.error("⚠️ High-risk poaching activity detected! Alert sent to authorities.")
                         else:
                             st.success("No suspicious activities detected.")
-                
 
 if __name__ == "__main__":
     main()
