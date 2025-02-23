@@ -12,7 +12,6 @@ import matplotlib.pyplot as plt
 import time
 from datetime import datetime
 import os
-import requests
 from torchvision import transforms
 from torchvision.models import mobilenet_v3_large, MobileNet_V3_Large_Weights
 import torch.nn.functional as F
@@ -21,7 +20,8 @@ import torch.nn.functional as F
 species_processor = AutoImageProcessor.from_pretrained("microsoft/resnet-50")
 species_model = AutoModelForImageClassification.from_pretrained("microsoft/resnet-50").eval()
 yolo_model = YOLO("yolov8x.pt")
-threat_model = pipeline("image-classification", model="nateraw/vit-base-beans")
+# Use a different model for threat detection
+threat_model = pipeline("image-classification", model="google/vit-base-patch16-224")
 
 # Habitat Analysis Model
 class HabitatAnalyzer:
